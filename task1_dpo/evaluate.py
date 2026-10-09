@@ -167,17 +167,16 @@ def evaluate_dpo(
             do_sample=bool(cfg.get("generation", {}).get("do_sample", True)),
         )
 
-        # Policy token log-probs on generated responses
-        pol_tok_logp, _ = response_token_logprobs(
-            policy,
-            gen_out["sequences"],
-            gen_out["attention_mask"],
-            gen_out["prompt_width"],
-            gen_out["response_ids"],
-        )
-
-        # Reference token log-probs on generated responses
+        # Compute token log-probs for policy and reference under no_grad
         with torch.no_grad():
+            pol_tok_logp, _ = response_token_logprobs(
+                policy,
+                gen_out["sequences"],
+                gen_out["attention_mask"],
+                gen_out["prompt_width"],
+                gen_out["response_ids"],
+            )
+
             with reference_mode(policy):
                 ref_tok_logp, _ = response_token_logprobs(
                     policy,

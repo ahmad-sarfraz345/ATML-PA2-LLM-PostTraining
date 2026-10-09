@@ -52,7 +52,7 @@ def batch_generate(
     if do_sample:
         kwargs.update({"temperature": temperature, "top_p": top_p})
 
-    with torch.inference_mode():
+    with torch.no_grad():
         seq = model.generate(**enc, **kwargs)
     if was_training:
         model.train()
@@ -85,6 +85,9 @@ def batch_generate(
 
 
 def response_token_logprobs(model, sequences, attention_mask, prompt_width, response_ids):
+    sequences = sequences.detach().clone()
+    attention_mask = attention_mask.detach().clone()
+    response_ids = response_ids.detach().clone()
     outputs = model(
         input_ids=sequences,
         attention_mask=attention_mask,
