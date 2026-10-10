@@ -173,7 +173,10 @@ def run_ppo(
         effective_reward = raw_reward_val if has_eos else (raw_reward_val - missing_eos_pen)
         task_reward_tensor = torch.tensor([effective_reward], device=device, dtype=torch.float32)
 
-        # 4. Old-policy token log-probabilities
+        # 4. Old-policy token log-probabilities (eval mode to avoid LoRA dropout noise)
+        policy.eval()
+        value_model.eval()
+
         with torch.no_grad():
             old_logp, _ = response_token_logprobs(
                 policy,
@@ -250,9 +253,17 @@ def run_ppo(
             )
 
             policy_optimizer.zero_grad()
-            pol_loss.backward()
-            p_norm = torch.nn.utils.clip_grad_norm_(trainable_parameters(policy), max_grad_norm)
-            policy_optimizer.step()
+            p_norm_val = 0.0
+            if not torch.isnan(pol_loss) and not torch.isinf(pol_loss):
+                pol_loss.backward()
+                p_norm = torch.nn.utils.clip_grad_norm_(trainable_parameters(policy), max_grad_norm)
+                p_norm_val = float(p_norm.item() if hasattr(p_norm, "item") else p_norm)
+                if not (torch.isnan(p_norm) or torch.isinf(p_norm)):
+                    policy_optimizer.step()
+                else:
+                    policy_optimizer.zero_grad()
+            else:
+                policy_optimizer.zero_grad()
 
             # Value model forward pass
             new_full_vals = token_values(value_model, gen["sequences"], gen["attention_mask"])
@@ -260,14 +271,22 @@ def run_ppo(
             val_loss = value_mse_loss(new_vals, returns, gen["response_mask"])
 
             value_optimizer.zero_grad()
-            (value_coef * val_loss).backward()
-            v_norm = torch.nn.utils.clip_grad_norm_(trainable_parameters(value_model), max_grad_norm)
-            value_optimizer.step()
+            v_norm_val = 0.0
+            if not torch.isnan(val_loss) and not torch.isinf(val_loss):
+                (value_coef * val_loss).backward()
+                v_norm = torch.nn.utils.clip_grad_norm_(trainable_parameters(value_model), max_grad_norm)
+                v_norm_val = float(v_norm.item() if hasattr(v_norm, "item") else v_norm)
+                if not (torch.isnan(v_norm) or torch.isinf(v_norm)):
+                    value_optimizer.step()
+                else:
+                    value_optimizer.zero_grad()
+            else:
+                value_optimizer.zero_grad()
 
-            epoch_pol_loss += pol_loss.item()
-            epoch_val_loss += val_loss.item()
-            epoch_clip_frac += clip_frac.item()
-            epoch_p_norm += float(p_norm.item() if hasattr(p_norm, "item") else p_norm)
+            epoch_pol_loss += float(pol_loss.item()) if not torch.isnan(pol_loss) else 0.0
+            epoch_val_loss += float(val_loss.item()) if not torch.isnan(val_loss) else 0.0
+            epoch_clip_frac += float(clip_frac.item()) if not torch.isnan(clip_frac) else 0.0
+            epoch_p_norm += p_norm_val
 
         avg_pol_loss = epoch_pol_loss / ppo_epochs
         avg_val_loss = epoch_val_loss / ppo_epochs
@@ -276,8 +295,9 @@ def run_ppo(
 
         # Compute diagnostics over response tokens
         with torch.no_grad():
-            cur_kl = sampled_kl(latest_new_logp, ref_logp, gen["response_mask"]).item()
-            cur_entropy = sample_entropy(latest_new_logp, gen["response_mask"]).item()
+            eval_logp = latest_new_logp if latest_new_logp is not None else old_logp
+            cur_kl = float(sampled_kl(eval_logp, ref_logp, gen["response_mask"]).item())
+            cur_entropy = float(sample_entropy(eval_logp, gen["response_mask"]).item())
 
         elapsed = time.time() - start_time
         peak_vram = round(torch.cuda.max_memory_allocated() / (1024**3), 2) if torch.cuda.is_available() else 0.0
@@ -298,6 +318,9 @@ def run_ppo(
             "peak_vram_gib": peak_vram,
         }
         history.append(step_record)
+        log_path = results_dir / f"{run_name}_train_log.json"
+        with open(log_path, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
 
         pbar.set_postfix({
             "R": f"{raw_reward_val:.2f}",

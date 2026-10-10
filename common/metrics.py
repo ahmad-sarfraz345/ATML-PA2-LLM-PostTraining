@@ -6,8 +6,11 @@ import torch
 
 
 def masked_mean(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    mask = mask.to(dtype=x.dtype)
-    return (x * mask).sum() / mask.sum().clamp_min(1.0)
+    mask_b = mask.bool()
+    if not mask_b.any():
+        return torch.zeros((), device=x.device, dtype=x.dtype)
+    safe_x = torch.where(mask_b, x, torch.zeros_like(x))
+    return safe_x.sum() / mask_b.sum().clamp_min(1).to(dtype=x.dtype)
 
 
 def sampled_kl(policy_logp: torch.Tensor, ref_logp: torch.Tensor, mask: torch.Tensor):

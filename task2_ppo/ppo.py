@@ -11,9 +11,12 @@ def compute_gae(rewards, values, mask, gamma=1.0, lam=0.95):
     rewards, values, mask: [batch, response_steps]. Padding positions must have mask=0.
     The final valid response position bootstraps with zero.
     """
+    rewards = rewards.float()
+    values = values.float()
+    mask = mask.float()
     batch, steps = rewards.shape
     advantages = torch.zeros_like(rewards)
-    last_adv = torch.zeros(batch, device=rewards.device, dtype=rewards.dtype)
+    last_adv = torch.zeros(batch, device=rewards.device, dtype=torch.float32)
 
     for t in reversed(range(steps)):
         current_valid = mask[:, t]
@@ -35,11 +38,11 @@ def compute_gae(rewards, values, mask, gamma=1.0, lam=0.95):
 
 def shaped_rewards(task_reward, policy_logp, ref_logp, response_mask, beta_kl):
     """Sampled-action KL shaping plus terminal learned reward."""
-    rewards = -float(beta_kl) * (policy_logp - ref_logp) * response_mask
+    rewards = -float(beta_kl) * (policy_logp.float() - ref_logp.float()) * response_mask.float()
     for b in range(rewards.shape[0]):
         valid = int(response_mask[b].sum().item())
         if valid > 0:
-            rewards[b, valid - 1] += task_reward[b]
+            rewards[b, valid - 1] += float(task_reward[b].item() if hasattr(task_reward[b], "item") else task_reward[b])
     return rewards
 
 
@@ -48,9 +51,10 @@ def ppo_policy_loss(new_logp, old_logp, advantage, mask, eps=0.2):
 
     Validate this starter implementation against the clipped surrogate in the assignment manual.
     """
-    ratio = torch.exp(new_logp - old_logp)
-    surr1 = ratio * advantage
-    surr2 = ratio.clamp(1.0 - eps, 1.0 + eps) * advantage
+    log_ratio = (new_logp.float() - old_logp.float()).clamp(-20.0, 20.0)
+    ratio = torch.exp(log_ratio)
+    surr1 = ratio * advantage.float()
+    surr2 = ratio.clamp(1.0 - eps, 1.0 + eps) * advantage.float()
 
     objective = torch.minimum(surr1, surr2)
 
@@ -61,13 +65,17 @@ def ppo_policy_loss(new_logp, old_logp, advantage, mask, eps=0.2):
 
 
 def value_mse_loss(predicted_values, returns, mask):
-    return masked_mean((predicted_values - returns) ** 2, mask)
+    diff = predicted_values.float() - returns.float()
+    return masked_mean(diff ** 2, mask)
 
 
 def normalize_advantages(advantages, mask, eps=1e-6):
-    valid = advantages[mask.bool()]
+    mask_b = mask.bool()
+    adv_f = advantages.float()
+    valid = adv_f[mask_b]
     if valid.numel() <= 1:
-        return advantages
+        return torch.where(mask_b, adv_f, torch.zeros_like(adv_f))
     mean = valid.mean()
     std = valid.std(unbiased=False).clamp_min(eps)
-    return ((advantages - mean) / std) * mask
+    normed = (adv_f - mean) / std
+    return torch.where(mask_b, normed, torch.zeros_like(adv_f))
