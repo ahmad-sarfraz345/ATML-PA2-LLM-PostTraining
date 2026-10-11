@@ -78,24 +78,32 @@ def evaluate_safety(config_path: str):
     outdir = repo_path(cfg.get("results_dir", "results")) / "task4_safety"
     outdir.mkdir(parents=True, exist_ok=True)
 
-    policies = ["sft", "dpo", "ppo", "grpo"]
+    candidate_policies = ["sft", "dpo", "ppo", "grpo"]
     policy_data = {}
+    available_policies = []
 
-    for p in policies:
+    for p in candidate_policies:
         j_file = outdir / f"judged_{p}.jsonl"
-        if not j_file.exists():
-            raise FileNotFoundError(f"Judged response file for {p} not found: {j_file}. Run judge_responses first.")
-        policy_data[p] = read_jsonl(j_file)
+        if j_file.exists():
+            available_policies.append(p)
+            policy_data[p] = read_jsonl(j_file)
+        else:
+            print(f"[evaluate_safety] Note: Judged file for '{p}' not found ({j_file.name}).")
+
+    if not available_policies:
+        raise FileNotFoundError(
+            f"No judged policy files found in {outdir}. Run generate_responses and judge_responses first."
+        )
 
     print("=" * 80)
-    print("TASK 4: SAFETY CALIBRATION EVALUATION ACROSS SFT, DPO, PPO, GRPO")
+    print(f"TASK 4: SAFETY CALIBRATION EVALUATION (Policies: {', '.join(p.upper() for p in available_policies)})")
     print("=" * 80)
 
     # 1. Overall Safety Calibration Summary
     calibration_summary = {}
     summary_rows = []
 
-    for p in policies:
+    for p in available_policies:
         metrics = compute_policy_calibration(policy_data[p])
         calibration_summary[p] = metrics
         summary_rows.append({
@@ -122,12 +130,13 @@ def evaluate_safety(config_path: str):
     print(summary_df.to_string(index=False))
 
     # 2. Category-Level Breakdown across all 18 XSTest types
-    all_categories = sorted(list(set(str(r["type"]) for r in policy_data["sft"])))
+    base_cat_policy = "sft" if "sft" in available_policies else available_policies[0]
+    all_categories = sorted(list(set(str(r["type"]) for r in policy_data[base_cat_policy])))
     cat_rows = []
 
     for cat in all_categories:
         row = {"Category": cat}
-        for p in policies:
+        for p in available_policies:
             cat_items = [r for r in policy_data[p] if str(r["type"]) == cat]
             n_cat = max(len(cat_items), 1)
             counts = Counter(r.get("judge_label") for r in cat_items)
@@ -191,33 +200,41 @@ def evaluate_safety(config_path: str):
 
     # 4. Qualitative Disagreement Case Extraction
     qualitative_cases = []
-    # Identify cases of harmful compliance, justified refusal, and exaggerated refusal
-    for r_sft, r_dpo, r_ppo, r_grpo in zip(
-        policy_data["sft"], policy_data["dpo"], policy_data["ppo"], policy_data["grpo"]
-    ):
-        labels_set = {
-            r_sft.get("judge_label"),
-            r_dpo.get("judge_label"),
-            r_ppo.get("judge_label"),
-            r_grpo.get("judge_label"),
-        }
-        # If there is policy disagreement or notable behavior
-        if len(labels_set) > 1 and len(qualitative_cases) < 12:
-            qualitative_cases.append({
-                "xstest_id": r_sft["xstest_id"],
-                "prompt": r_sft["prompt"],
-                "benchmark_class": r_sft["benchmark_class"],
-                "category": r_sft["type"],
-                "sft": {"label": r_sft.get("judge_label"), "response": r_sft.get("response", "")[:300]},
-                "dpo": {"label": r_dpo.get("judge_label"), "response": r_dpo.get("response", "")[:300]},
-                "ppo": {"label": r_ppo.get("judge_label"), "response": r_ppo.get("response", "")[:300]},
-                "grpo": {"label": r_grpo.get("judge_label"), "response": r_grpo.get("response", "")[:300]},
-            })
+    if len(available_policies) > 1:
+        n_items = min(len(policy_data[p]) for p in available_policies)
+        for i in range(n_items):
+            labels_set = {policy_data[p][i].get("judge_label") for p in available_policies}
+            if len(labels_set) > 1 and len(qualitative_cases) < 12:
+                first_row = policy_data[available_policies[0]][i]
+                case = {
+                    "xstest_id": first_row["xstest_id"],
+                    "prompt": first_row["prompt"],
+                    "benchmark_class": first_row["benchmark_class"],
+                    "category": first_row["type"],
+                }
+                for p in available_policies:
+                    case[p] = {
+                        "label": policy_data[p][i].get("judge_label"),
+                        "response": policy_data[p][i].get("response", "")[:300],
+                    }
+                qualitative_cases.append(case)
+    else:
+        single_p = available_policies[0]
+        for r in policy_data[single_p]:
+            lbl = r.get("judge_label")
+            if lbl in ("OVER_REFUSAL", "UNSAFE_COMPLIANCE", "JUSTIFIED_REFUSAL") and len(qualitative_cases) < 12:
+                qualitative_cases.append({
+                    "xstest_id": r["xstest_id"],
+                    "prompt": r["prompt"],
+                    "benchmark_class": r["benchmark_class"],
+                    "category": r["type"],
+                    single_p: {"label": lbl, "response": r.get("response", "")[:300]},
+                })
 
     out_cases_json = outdir / "qualitative_disagreements.json"
     with open(out_cases_json, "w", encoding="utf-8") as f:
         json.dump(qualitative_cases, f, indent=2)
-    print(f"\nWrote qualitative disagreement cases to {out_cases_json}\n")
+    print(f"\nWrote qualitative cases to {out_cases_json}\n")
 
     return {
         "calibration_summary": calibration_summary,

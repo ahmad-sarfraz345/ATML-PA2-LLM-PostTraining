@@ -134,13 +134,17 @@ def judge_batch(tok, model, batch_items, max_new_tokens=64):
     return results
 
 
-def judge_policy_responses(tok, model, cfg, policy_name: str, batch_size: int = 8, force: bool = False):
+def judge_policy_responses(tok, model, cfg, policy_name: str, batch_size: int = 8, force: bool = False, allow_missing: bool = False):
     results_dir = repo_path(cfg.get("results_dir", "results")) / "task4_safety"
     in_file = results_dir / f"generated_{policy_name}.jsonl"
     out_file = results_dir / f"judged_{policy_name}.jsonl"
 
     if not in_file.exists():
-        raise FileNotFoundError(f"Generated responses file not found: {in_file}. Run generate_responses first.")
+        msg = f"Generated responses file not found: {in_file}. Run generate_responses first."
+        if allow_missing:
+            print(f"[{policy_name}] [SKIP] {msg}")
+            return None
+        raise FileNotFoundError(msg)
 
     if out_file.exists() and not force:
         print(f"[{policy_name}] Found existing judged responses at {out_file}, skipping judging.")
@@ -156,7 +160,7 @@ def judge_policy_responses(tok, model, cfg, policy_name: str, batch_size: int = 
         chunk = rows[start : start + batch_size]
         try:
             eval_results = judge_batch(tok, model, chunk, max_new_tokens=max_new_tokens)
-        except Exception as e:
+        except Exception:
             # Fallback to sequential judge_one if batching hits OOM or error
             eval_results = [
                 judge_one(tok, model, item["prompt"], item["response"], max_new_tokens=max_new_tokens)
@@ -177,14 +181,27 @@ def judge_policy_responses(tok, model, cfg, policy_name: str, batch_size: int = 
     return out_file
 
 
-def judge_all_policies(cfg, batch_size: int = 8, force: bool = False, specific_policy: str | None = None):
+def judge_all_policies(cfg, batch_size: int = 8, force: bool = False, specific_policy: str | None = None, allow_missing: bool = False):
     targets = [specific_policy] if specific_policy and specific_policy != "all" else ["sft", "dpo", "ppo", "grpo"]
+    results_dir = repo_path(cfg.get("results_dir", "results")) / "task4_safety"
+
+    # Filter targets if allow_missing is set and generated file does not exist
+    if allow_missing:
+        targets_to_run = [p for p in targets if (results_dir / f"generated_{p}.jsonl").exists()]
+        if not targets_to_run:
+            print("No generated response files found to judge. Please run generate_responses first.")
+            return {}
+    else:
+        targets_to_run = targets
+
     tok, model = load_judge(cfg)
     print(f"Loaded Task 4 AI judge: {cfg['ai_judge_model']}\n")
 
     out_files = {}
     for p in targets:
-        out_files[p] = judge_policy_responses(tok, model, cfg, p, batch_size=batch_size, force=force)
+        f = judge_policy_responses(tok, model, cfg, p, batch_size=batch_size, force=force, allow_missing=allow_missing)
+        if f is not None:
+            out_files[p] = f
 
     clear_gpu(model)
     return out_files
@@ -196,10 +213,17 @@ def main():
     ap.add_argument("--policy", choices=["all", "sft", "dpo", "ppo", "grpo"], default="all")
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--allow-missing", action="store_true", help="Skip policies whose generated files are missing instead of raising an error")
     args = ap.parse_args()
 
     cfg = load_yaml(args.config)
-    judge_all_policies(cfg, batch_size=args.batch_size, force=args.force, specific_policy=args.policy)
+    judge_all_policies(
+        cfg,
+        batch_size=args.batch_size,
+        force=args.force,
+        specific_policy=args.policy,
+        allow_missing=args.allow_missing,
+    )
 
 
 if __name__ == "__main__":
