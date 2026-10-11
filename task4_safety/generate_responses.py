@@ -37,13 +37,13 @@ def find_adapter_path(adapter: str | None) -> Path | None:
     # Check under /kaggle/input if running in Kaggle
     kaggle_input = Path("/kaggle/input")
     if kaggle_input.exists():
-        target_name = Path(adapter).name
         parent_name = Path(adapter).parent.name
+        policy_tag = parent_name.split("_")[-1] if "_" in parent_name else parent_name
         for candidate in kaggle_input.rglob("adapter_config.json"):
             folder = candidate.parent
-            if folder.name == target_name or (parent_name and parent_name in str(folder)):
+            if parent_name and parent_name in str(folder).lower():
                 return folder
-            if target_name in str(folder):
+            if policy_tag and policy_tag in str(folder).lower():
                 return folder
 
     return None
